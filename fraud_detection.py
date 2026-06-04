@@ -1,0 +1,136 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import os
+import joblib
+
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (
+    classification_report, confusion_matrix,
+    roc_auc_score, roc_curve, precision_recall_curve
+)
+from imblearn.over_sampling import SMOTE
+
+# ── 1. Load Data ──────────────────────────────────────────────────────────────
+DATA_PATH = "creditcard.csv"
+
+if not os.path.exists(DATA_PATH):
+    raise FileNotFoundError(
+        "creditcard.csv not found.\n"
+        "Download it from: https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud\n"
+        "Then place it in this folder."
+    )
+
+print("Loading dataset...")
+df = pd.read_csv(DATA_PATH)
+print(f"Shape: {df.shape}")
+print(f"\nClass distribution:\n{df['Class'].value_counts()}")
+print(f"Fraud %: {df['Class'].mean() * 100:.4f}%")
+
+# ── 2. Preprocess ─────────────────────────────────────────────────────────────
+scaler = StandardScaler()
+df["Amount"] = scaler.fit_transform(df[["Amount"]])
+df["Time"] = scaler.fit_transform(df[["Time"]])
+
+X = df.drop("Class", axis=1)
+y = df["Class"]
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+# ── 3. Handle Imbalance with SMOTE ────────────────────────────────────────────
+print("\nApplying SMOTE to balance training data...")
+smote = SMOTE(random_state=42)
+X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
+print(f"Resampled training set size: {X_train_res.shape[0]}")
+
+# ── 4. Train Models ───────────────────────────────────────────────────────────
+models = {
+    "Logistic Regression": LogisticRegression(max_iter=1000, random_state=42),
+    "Random Forest": RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1),
+}
+
+results = {}
+for name, model in models.items():
+    print(f"\nTraining {name}...")
+    model.fit(X_train_res, y_train_res)
+    y_pred = model.predict(X_test)
+    y_prob = model.predict_proba(X_test)[:, 1]
+
+    results[name] = {
+        "model": model,
+        "y_pred": y_pred,
+        "y_prob": y_prob,
+        "roc_auc": roc_auc_score(y_test, y_prob),
+    }
+
+    print(f"\n── {name} ──")
+    print(classification_report(y_test, y_pred, target_names=["Legit", "Fraud"]))
+    print(f"ROC-AUC: {results[name]['roc_auc']:.4f}")
+
+# ── 5. Save Best Model ────────────────────────────────────────────────────────
+best_name = max(results, key=lambda n: results[n]["roc_auc"])
+best_model = results[best_name]["model"]
+joblib.dump(best_model, "fraud_model.pkl")
+print(f"\nBest model: {best_name} (AUC={results[best_name]['roc_auc']:.4f}) saved as fraud_model.pkl")
+
+# ── 6. Plots ──────────────────────────────────────────────────────────────────
+os.makedirs("plots", exist_ok=True)
+
+# Confusion matrices
+fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+for ax, (name, res) in zip(axes, results.items()):
+    cm = confusion_matrix(y_test, res["y_pred"])
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", ax=ax,
+                xticklabels=["Legit", "Fraud"], yticklabels=["Legit", "Fraud"])
+    ax.set_title(f"{name}\nConfusion Matrix")
+    ax.set_ylabel("Actual")
+    ax.set_xlabel("Predicted")
+plt.tight_layout()
+plt.savefig("plots/confusion_matrices.png", dpi=150)
+plt.close()
+
+# ROC curves
+plt.figure(figsize=(7, 5))
+for name, res in results.items():
+    fpr, tpr, _ = roc_curve(y_test, res["y_prob"])
+    plt.plot(fpr, tpr, label=f"{name} (AUC={res['roc_auc']:.4f})")
+plt.plot([0, 1], [0, 1], "k--")
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.title("ROC Curve")
+plt.legend()
+plt.tight_layout()
+plt.savefig("plots/roc_curves.png", dpi=150)
+plt.close()
+
+# Precision-Recall curves
+plt.figure(figsize=(7, 5))
+for name, res in results.items():
+    precision, recall, _ = precision_recall_curve(y_test, res["y_prob"])
+    plt.plot(recall, precision, label=name)
+plt.xlabel("Recall")
+plt.ylabel("Precision")
+plt.title("Precision-Recall Curve")
+plt.legend()
+plt.tight_layout()
+plt.savefig("plots/precision_recall_curves.png", dpi=150)
+plt.close()
+
+# Feature importance (Random Forest)
+rf = results["Random Forest"]["model"]
+feat_imp = pd.Series(rf.feature_importances_, index=X.columns).nlargest(15)
+plt.figure(figsize=(8, 5))
+feat_imp.sort_values().plot(kind="barh", color="steelblue")
+plt.title("Top 15 Feature Importances (Random Forest)")
+plt.tight_layout()
+plt.savefig("plots/feature_importance.png", dpi=150)
+plt.close()
+
+print("\nPlots saved to plots/")
+print("\nDone!")
