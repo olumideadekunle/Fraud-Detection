@@ -144,4 +144,25 @@ output_df["Correct"]          = output_df["ActualClass"] == output_df["Predicted
 output_df.insert(0, "TransactionID", range(1, len(output_df) + 1))
 output_df[["TransactionID", "ActualClass", "PredictedClass", "FraudProbability", "Correct"]].to_csv("output.csv", index=False)
 print("Predictions saved to output.csv")
+
+# ── 8. Save Model Report ──────────────────────────────────────────────────────
+with open("model_report.txt", "w") as f:
+    f.write("FRAUD DETECTION MODEL REPORT\n")
+    f.write("=" * 50 + "\n\n")
+    f.write(f"Dataset Shape      : {df.shape}\n")
+    f.write(f"Fraud Transactions : {int(y.sum())} ({y.mean()*100:.4f}%)\n")
+    f.write(f"Legit Transactions : {int((y==0).sum())}\n")
+    f.write(f"Train Size         : {len(X_train_res)} (after SMOTE)\n")
+    f.write(f"Test Size          : {len(X_test)}\n\n")
+    f.write("=" * 50 + "\n")
+    for name, res in results.items():
+        f.write(f"\nModel: {name}\n")
+        f.write("-" * 40 + "\n")
+        f.write(classification_report(y_test, res["y_pred"], target_names=["Legit", "Fraud"]))
+        f.write(f"ROC-AUC: {res['roc_auc']:.4f}\n")
+    f.write("\n" + "=" * 50 + "\n")
+    f.write(f"Best Model : {best_name}\n")
+    f.write(f"Best AUC   : {results[best_name]['roc_auc']:.4f}\n")
+    f.write(f"Saved As   : fraud_model.pkl\n")
+print("Model report saved to model_report.txt")
 print("\nDone!")
