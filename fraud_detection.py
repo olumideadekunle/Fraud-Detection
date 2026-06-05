@@ -11,9 +11,11 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import (
     classification_report, confusion_matrix,
-    roc_auc_score, roc_curve, precision_recall_curve
+    roc_auc_score, roc_curve, precision_recall_curve,
+    average_precision_score
 )
 from imblearn.over_sampling import SMOTE
+import shap
 
 # ── 1. Load Data ──────────────────────────────────────────────────────────────
 DATA_PATH = "creditcard.csv"
@@ -34,7 +36,7 @@ print(f"Fraud %: {df['Class'].mean() * 100:.4f}%")
 # ── 2. Preprocess ─────────────────────────────────────────────────────────────
 scaler = StandardScaler()
 df["Amount"] = scaler.fit_transform(df[["Amount"]])
-df["Time"] = scaler.fit_transform(df[["Time"]])
+df["Time"]   = scaler.fit_transform(df[["Time"]])
 
 X = df.drop("Class", axis=1)
 y = df["Class"]
@@ -49,10 +51,22 @@ smote = SMOTE(random_state=42)
 X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
 print(f"Resampled training set size: {X_train_res.shape[0]}")
 
-# ── 4. Train Models ───────────────────────────────────────────────────────────
+# ── 4. Compute class weight for cost-sensitive learning ───────────────────────
+fraud_count = int(y_train.sum())
+legit_count = int((y_train == 0).sum())
+scale_pos_weight = legit_count / fraud_count
+print(f"\nCost-sensitive weight (legit/fraud): {scale_pos_weight:.2f}")
+
+# ── 5. Train Models ───────────────────────────────────────────────────────────
 models = {
-    "Logistic Regression": LogisticRegression(max_iter=1000, random_state=42),
-    "Random Forest": RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1),
+    "Logistic Regression": LogisticRegression(
+        max_iter=1000, random_state=42,
+        class_weight="balanced"          # cost-sensitive
+    ),
+    "Random Forest": RandomForestClassifier(
+        n_estimators=100, random_state=42, n_jobs=-1,
+        class_weight="balanced"          # cost-sensitive
+    ),
 }
 
 results = {}
@@ -63,23 +77,25 @@ for name, model in models.items():
     y_prob = model.predict_proba(X_test)[:, 1]
 
     results[name] = {
-        "model": model,
-        "y_pred": y_pred,
-        "y_prob": y_prob,
+        "model":   model,
+        "y_pred":  y_pred,
+        "y_prob":  y_prob,
         "roc_auc": roc_auc_score(y_test, y_prob),
+        "pr_auc":  average_precision_score(y_test, y_prob),
     }
 
     print(f"\n── {name} ──")
     print(classification_report(y_test, y_pred, target_names=["Legit", "Fraud"]))
-    print(f"ROC-AUC: {results[name]['roc_auc']:.4f}")
+    print(f"ROC-AUC : {results[name]['roc_auc']:.4f}")
+    print(f"PR-AUC  : {results[name]['pr_auc']:.4f}")
 
-# ── 5. Save Best Model ────────────────────────────────────────────────────────
-best_name = max(results, key=lambda n: results[n]["roc_auc"])
+# ── 6. Save Best Model ────────────────────────────────────────────────────────
+best_name  = max(results, key=lambda n: results[n]["roc_auc"])
 best_model = results[best_name]["model"]
 joblib.dump(best_model, "fraud_model.pkl")
 print(f"\nBest model: {best_name} (AUC={results[best_name]['roc_auc']:.4f}) saved as fraud_model.pkl")
 
-# ── 6. Plots ──────────────────────────────────────────────────────────────────
+# ── 7. Plots ──────────────────────────────────────────────────────────────────
 os.makedirs("plots", exist_ok=True)
 
 # Confusion matrices
@@ -113,17 +129,17 @@ plt.close()
 plt.figure(figsize=(7, 5))
 for name, res in results.items():
     precision, recall, _ = precision_recall_curve(y_test, res["y_prob"])
-    plt.plot(recall, precision, label=name)
+    plt.plot(recall, precision, label=f"{name} (PR-AUC={res['pr_auc']:.4f})")
 plt.xlabel("Recall")
 plt.ylabel("Precision")
-plt.title("Precision-Recall Curve")
+plt.title("Precision-Recall Curve (AUC-PR)")
 plt.legend()
 plt.tight_layout()
 plt.savefig("plots/precision_recall_curves.png", dpi=150)
 plt.close()
 
 # Feature importance (Random Forest)
-rf = results["Random Forest"]["model"]
+rf       = results["Random Forest"]["model"]
 feat_imp = pd.Series(rf.feature_importances_, index=X.columns).nlargest(15)
 plt.figure(figsize=(8, 5))
 feat_imp.sort_values().plot(kind="barh", color="steelblue")
@@ -134,9 +150,33 @@ plt.close()
 
 print("\nPlots saved to plots/")
 
-# ── 7. Export Predictions to CSV ─────────────────────────────────────────────
-best_res = results[best_name]
-output_df = X_test.copy()
+# ── 8. SHAP Explanations ──────────────────────────────────────────────────────
+print("\nGenerating SHAP explanations (Random Forest)...")
+rf_model   = results["Random Forest"]["model"]
+explainer  = shap.TreeExplainer(rf_model)
+X_sample   = X_test.iloc[:200]           # use 200 samples for speed
+shap_values = explainer.shap_values(X_sample)
+
+# SHAP summary plot
+shap_fraud = shap_values[1] if isinstance(shap_values, list) else shap_values
+plt.figure()
+shap.summary_plot(shap_fraud, X_sample, show=False)
+plt.tight_layout()
+plt.savefig("plots/shap_summary.png", dpi=150, bbox_inches="tight")
+plt.close()
+
+# SHAP bar plot
+plt.figure()
+shap.summary_plot(shap_fraud, X_sample, plot_type="bar", show=False)
+plt.tight_layout()
+plt.savefig("plots/shap_bar.png", dpi=150, bbox_inches="tight")
+plt.close()
+
+print("SHAP plots saved to plots/shap_summary.png and plots/shap_bar.png")
+
+# ── 9. Export Predictions to CSV ──────────────────────────────────────────────
+best_res   = results[best_name]
+output_df  = X_test.copy()
 output_df["ActualClass"]      = y_test.values
 output_df["PredictedClass"]   = best_res["y_pred"]
 output_df["FraudProbability"] = best_res["y_prob"].round(4)
@@ -145,7 +185,7 @@ output_df.insert(0, "TransactionID", range(1, len(output_df) + 1))
 output_df[["TransactionID", "ActualClass", "PredictedClass", "FraudProbability", "Correct"]].to_csv("output.csv", index=False)
 print("Predictions saved to output.csv")
 
-# ── 8. Save Model Report ──────────────────────────────────────────────────────
+# ── 10. Save Model Report ─────────────────────────────────────────────────────
 with open("model_report.txt", "w") as f:
     f.write("FRAUD DETECTION MODEL REPORT\n")
     f.write("=" * 50 + "\n\n")
@@ -153,13 +193,15 @@ with open("model_report.txt", "w") as f:
     f.write(f"Fraud Transactions : {int(y.sum())} ({y.mean()*100:.4f}%)\n")
     f.write(f"Legit Transactions : {int((y==0).sum())}\n")
     f.write(f"Train Size         : {len(X_train_res)} (after SMOTE)\n")
-    f.write(f"Test Size          : {len(X_test)}\n\n")
+    f.write(f"Test Size          : {len(X_test)}\n")
+    f.write(f"Cost-Sensitive     : class_weight=balanced\n\n")
     f.write("=" * 50 + "\n")
     for name, res in results.items():
         f.write(f"\nModel: {name}\n")
         f.write("-" * 40 + "\n")
         f.write(classification_report(y_test, res["y_pred"], target_names=["Legit", "Fraud"]))
-        f.write(f"ROC-AUC: {res['roc_auc']:.4f}\n")
+        f.write(f"ROC-AUC : {res['roc_auc']:.4f}\n")
+        f.write(f"PR-AUC  : {res['pr_auc']:.4f}\n")
     f.write("\n" + "=" * 50 + "\n")
     f.write(f"Best Model : {best_name}\n")
     f.write(f"Best AUC   : {results[best_name]['roc_auc']:.4f}\n")
