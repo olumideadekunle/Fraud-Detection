@@ -133,4 +133,15 @@ plt.savefig("plots/feature_importance.png", dpi=150)
 plt.close()
 
 print("\nPlots saved to plots/")
+
+# ── 7. Export Predictions to CSV ─────────────────────────────────────────────
+best_res = results[best_name]
+output_df = X_test.copy()
+output_df["ActualClass"]      = y_test.values
+output_df["PredictedClass"]   = best_res["y_pred"]
+output_df["FraudProbability"] = best_res["y_prob"].round(4)
+output_df["Correct"]          = output_df["ActualClass"] == output_df["PredictedClass"]
+output_df.insert(0, "TransactionID", range(1, len(output_df) + 1))
+output_df[["TransactionID", "ActualClass", "PredictedClass", "FraudProbability", "Correct"]].to_csv("output.csv", index=False)
+print("Predictions saved to output.csv")
 print("\nDone!")
